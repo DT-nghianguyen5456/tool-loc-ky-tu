@@ -1,85 +1,115 @@
 import streamlit as st
-from PIL import Image
+import cv2
+import numpy as np
 import pytesseract
+from PIL import Image
+import re
 
 # Cấu hình trang
-st.set_page_config(page_title="Tool Lọc Code Đa Năng", page_icon="⚡")
-st.title("⚡ Tool Quét Ảnh & Nhập Tay")
+st.set_page_config(page_title="Tool Lọc Code Siêu Tốc", page_icon="⚡")
 
-# --- PHẦN 1: UPLOAD ẢNH ---
-st.info("Cách dùng: Bạn có thể Upload ảnh để lấy chữ, HOẶC nhập tay, HOẶC làm cả hai!")
+# --- HÀM XỬ LÝ ẢNH ---
+def clean_text(text):
+    # Lọc bỏ tất cả ký tự đặc biệt, chỉ giữ chữ và số
+    return re.sub(r'[^a-zA-Z0-9]', '', text)
 
-uploaded_file = st.file_uploader("1. Chọn ảnh (Nếu có)", type=['png', 'jpg', 'jpeg'])
-
-# Biến để kiểm soát việc quét ảnh (tránh quét lại nhiều lần khi bấm nút khác)
-if 'last_uploaded_file' not in st.session_state:
-    st.session_state['last_uploaded_file'] = None
-
-# Xử lý khi có file mới
-if uploaded_file is not None:
-    # Chỉ xử lý nếu đây là file mới (khác file cũ)
-    if uploaded_file != st.session_state['last_uploaded_file']:
-        try:
-            image = Image.open(uploaded_file)
-            st.image(image, caption='Ảnh vừa tải lên', width=300)
-            
-            with st.spinner('Đang đọc chữ từ ảnh...'):
-                text_ocr = pytesseract.image_to_string(image)
-            
-            if text_ocr.strip():
-                st.toast("Đã quét xong! Đang cập nhật văn bản...", icon="✅")
-                
-                # --- KHẮC PHỤC LỖI TẠI ĐÂY ---
-                # Cập nhật trực tiếp vào 'input_box' để ô text thay đổi ngay lập tức
-                current_text = st.session_state.get('input_box', "")
-                st.session_state['input_box'] = current_text + "\n" + text_ocr
-                
-                # Lưu lại file này là đã xử lý
-                st.session_state['last_uploaded_file'] = uploaded_file
-            else:
-                st.warning("Ảnh này không có chữ hoặc quá mờ!")
-                
-        except Exception as e:
-            st.error(f"Lỗi đọc ảnh: {e}")
-
-# --- PHẦN 2: Ô NHẬP LIỆU CHÍNH ---
-st.write("---")
-
-# Khởi tạo giá trị mặc định cho ô input nếu chưa có
-if 'input_box' not in st.session_state:
-    st.session_state['input_box'] = ""
-
-noi_dung_cuoi = st.text_area(
-    "2. Nội dung cần xử lý (Bạn có thể sửa hoặc paste thêm vào đây):",
-    key="input_box", # Key này liên kết trực tiếp với session_state['input_box']
-    height=200
-)
-
-# --- PHẦN 3: XỬ LÝ ---
-col1, col2 = st.columns([1, 2])
-with col1:
-    so_ky_tu = st.number_input("Số ký tự ngắt dòng:", min_value=1, value=6)
-with col2:
-    st.write("") 
-    st.write("")
-    nut_bam = st.button("🚀 LỌC & XẾP NGAY", type="primary", use_container_width=True)
-
-if nut_bam:
-    if noi_dung_cuoi:
-        # 1. Lọc sạch (Chỉ lấy chữ và số)
-        chuoi_sach = "".join(k for k in noi_dung_cuoi if k.isalnum())
+def process_image(image_file):
+    # 1. Đọc ảnh
+    file_bytes = np.asarray(bytearray(image_file.read()), dtype=np.uint8)
+    image = cv2.imdecode(file_bytes, 1)
+    
+    # 2. Xử lý ảnh để tìm ô trắng
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Dùng Threshold đơn giản (Hiệu quả nhất với ô trắng nền tối)
+    # Ngưỡng 180: Chỉ lấy màu rất sáng (ô trắng)
+    _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+    
+    # Kỹ thuật quan trọng: "Hàn gắn" các vết đứt gãy để ô code thành 1 khối đặc
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 5))
+    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    
+    # Tìm viền
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    valid_boxes = []
+    for c in contours:
+        x, y, w, h = cv2.boundingRect(c)
+        aspect_ratio = w / float(h)
+        area = w * h
         
-        if not chuoi_sach:
-            st.error("Không tìm thấy ký tự Code nào hợp lệ!")
-        else:
-            # 2. Cắt dòng
-            ket_qua = []
-            for i in range(0, len(chuoi_sach), so_ky_tu):
-                ket_qua.append(chuoi_sach[i : i + so_ky_tu])
+        # BỘ LỌC CỨNG (Loại bỏ 99% nhiễu):
+        # 1. Chiều rộng phải lớn hơn chiều cao (Code nằm ngang)
+        # 2. Chiều rộng > 50px (Không lấy rác nhỏ)
+        # 3. Diện tích phải đủ lớn
+        if w > h and w > 50 and area > 1000:
+            valid_boxes.append((x, y, w, h))
             
-            # 3. Xuất kết quả
-            st.success(f"Xong! Tổng cộng: {len(chuoi_sach)} ký tự.")
-            final_text = "\n".join(ket_qua)
-            st.code(final_text, language='text')
-    else:
-        st.warning("Chưa có nội dung nào! Hãy up ảnh hoặc nhập chữ vào ô trên.")
+    # --- SAFETY LOCK (CHỐNG TREO MÁY) ---
+    # Nếu tìm thấy quá nhiều ô (do nhiễu), chỉ lấy 25 ô to nhất
+    if len(valid_boxes) > 25:
+        # Sắp xếp theo diện tích giảm dần, lấy 25 cái to nhất
+        valid_boxes = sorted(valid_boxes, key=lambda b: b[2]*b[3], reverse=True)[:25]
+    
+    # Sắp xếp lại từ trên xuống dưới, trái sang phải để hiển thị đẹp
+    valid_boxes.sort(key=lambda b: (b[1] // 40, b[0])) 
+
+    results = []
+    
+    # Bắt đầu đọc chữ (OCR)
+    for (x, y, w, h) in valid_boxes:
+        # Cắt vùng ảnh (ROI)
+        roi = gray[y:y+h, x:x+w]
+        
+        # Tiền xử lý cho OCR: Phóng to + Threshold cục bộ
+        roi = cv2.resize(roi, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        _, roi_thresh = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # Thêm viền trắng (padding) để chữ không sát mép
+        roi_final = cv2.copyMakeBorder(roi_thresh, 10, 10, 10, 10, cv2.BORDER_CONSTANT, value=[255])
+        
+        # Cấu hình chỉ đọc chữ cái và số (White list)
+        config = '--psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+        text = pytesseract.image_to_string(roi_final, config=config)
+        cleaned = clean_text(text)
+        
+        # Chỉ lấy mã có độ dài > 3 ký tự
+        if len(cleaned) > 3:
+            results.append(cleaned)
+            
+    return results, len(valid_boxes)
+
+# --- GIAO DIỆN WEB ---
+st.title("⚡ Tool Quét Code OKVIP")
+st.markdown("---")
+
+uploaded_file = st.file_uploader("Tải ảnh lên (hệ thống tự lọc bỏ nhiễu)", type=["jpg", "png", "jpeg"])
+
+if uploaded_file is not None:
+    # Hiển thị ảnh
+    st.image(uploaded_file, caption='Ảnh gốc', use_container_width=True)
+    
+    if st.button('🚀 BẮT ĐẦU QUÉT', type="primary"):
+        with st.spinner('Đang phân tích...'):
+            try:
+                codes, raw_count = process_image(uploaded_file)
+                
+                if codes:
+                    st.success(f"Đã xử lý {raw_count} vùng ảnh -> Lọc được {len(codes)} mã sạch!")
+                    st.markdown("### 👇 Bấm vào bên phải để Copy:")
+                    
+                    # Hiển thị dạng lưới 2 cột
+                    col1, col2 = st.columns(2)
+                    for i, code in enumerate(codes):
+                        if i % 2 == 0:
+                            with col1:
+                                st.code(code, language=None)
+                        else:
+                            with col2:
+                                st.code(code, language=None)
+                else:
+                    st.error("Không tìm thấy mã nào hợp lệ. Thử ảnh rõ hơn hoặc cắt bớt viền thừa.")
+                    
+            except Exception as e:
+                st.error(f"Lỗi: {e}")
+                st.info("Nếu chạy trên Cloud, hãy chắc chắn file packages.txt đã có tesseract-ocr.")
